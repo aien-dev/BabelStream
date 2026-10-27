@@ -36,3 +36,10 @@ CMakeFiles/
 .vscode/
 .directory
 .metals
+
+!src/omega/Makefile
+src/omega/omc
+src/omega/omega-stream
+src/omega/omega-stream-mutant
+src/omega/*.om.tmp
+src/omega/omega-stream*.om

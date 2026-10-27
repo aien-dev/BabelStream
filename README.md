@@ -48,6 +48,7 @@ This project also contains implementations in alternative languages with differe
 * Java - [java-stream](./src/java/java-stream)
 * Scala - [scala-stream](./src/scala/scala-stream)
 * Rust - [rust-stream](./src/rust/rust-stream)
+* Omega - [omega-stream](./src/omega) (serial, AArch64 Linux)
 
 ## How is this different to STREAM?
 

@@ -236,6 +236,30 @@ jobs:
       - name: Test run project (float)
         run: ./target/release/rust-stream --arraysize 2048 --float
 
+  omega:
+    # The Omega compiler (omc) runs on AArch64 Linux only.
+    name: omega / aarch64
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: ./src/omega
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Fetch pinned compiler and compile project
+        run: make
+      - name: Test run project
+        run: ./omega-stream --arraysize 2048
+      - name: Test run project (float)
+        run: ./omega-stream --arraysize 2048 --float
+      - name: Test run project (all kernels, both precisions, both orders, pool boundary)
+        run: make check
+      - name: Test run project (default size)
+        run: ./omega-stream --numtimes 10
+      - name: Negative control (broken Triad must fail validation)
+        run: make negative-control
+
   java:
     name: java / ${{ matrix.architecture }}
     runs-on: ${{ matrix.architecture == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}

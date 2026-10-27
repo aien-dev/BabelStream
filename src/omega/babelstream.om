@@ -1,0 +1,1387 @@
+note BabelStream Omega model: the six BabelStream kernels in seeded Omegese, serial, CPU only.
+note For full license terms please see the LICENSE file distributed with this source code.
+note
+note Build: cat fmt.om babelstream.om | omc > omega-stream   (see README.md and Makefile)
+note Mirrors src/main.cpp + src/serial: same kernels, start values, run order, timing rules,
+note check_solution tolerances, command-line options and output format.
+note
+note Storage. Omega has no heap (OMEGESE.md, globals): arrays are zero-filled global pools of at most
+note 16777216 elements each and 1 GiB in total. Each double array is two pools (elements
+note 0 .. 2^24-1 and 2^24 .. 2^25-1), so double runs take up to 2^25 elements (the default);
+note each float array is one pool, so --float runs take up to 2^24 elements.
+note Pools: 3 * 2 * 2^24 * 8 + 3 * 2^24 * 4 = 1006632960 bytes <= 2^30.
+note Loops: a `for` with a counted bound runs at most 1000000 passes, so every kernel walks
+note its pool in blocks of 1024 elements plus a tail.
+
+const CH ulong 16777216
+global ad0 f64 16777216
+global ad1 f64 16777216
+global bd0 f64 16777216
+global bd1 f64 16777216
+global cd0 f64 16777216
+global cd1 f64 16777216
+global af f32 16777216
+global bf f32 16777216
+global cf f32 16777216
+
+note cfg: 0 array size, 1 num times, 2 float (0/1), 3 csv (0/1), 4 unit (0 MB, 1 GB, 2 TB,
+note 3 MiB, 4 GiB, 5 TiB), 5 silence errors (0/1), 6 selection (0..5 one benchmark in the
+note bench order Copy Mul Add Triad Dot Nstream, 6 Classic, 7 All), 7 order (0 Classic,
+note 1 Isolated), 8 failed checks.
+global cfg ulong 9
+note tst: per benchmark k (bench order) min k, max 6+k, sum 12+k of the timings 1 .. n-1.
+global tst f64 18
+note dot results and gold values (a, b, c, sum) per precision
+global rsd f64 1
+global rsf f32 1
+global gd f64 4
+global gf f32 4
+note command line argument bytes and length
+global ab uchar 4096
+global abn ulong 1
+
+text tbabel "BabelStream\nVersion: 5.0\nImplementation: Omega\n"
+text trun "Running "
+text tall " All kernels "
+text tclas " Classic kernels "
+text tsp " "
+text ttimes " times in "
+text tocl " Classic"
+text toiso " Isolated"
+text tordr " order \n"
+text tnel "Number of elements: "
+text tprec "Precision: "
+text tdbl "double\n"
+text tflt "float\n"
+text tasz "Array size: "
+text ttsz "Total size: "
+text tnl "\n"
+text tcomma ","
+text tfunc "Function"
+text tps "/s"
+text tmin "Min (sec)"
+text tmax "Max"
+text tavg "Average"
+text tcsvh "function,num_times,n_elements,sizeof,max_"
+text tcsvh2 "_per_sec,min_runtime,max_runtime,avg_runtime\n"
+text tmb "MB"
+text tgb "GB"
+text ttb "TB"
+text tmib "MiB"
+text tgib "GiB"
+text ttib "TiB"
+text lcopy "Copy"
+text lmul "Mul"
+text ladd "Add"
+text ltriad "Triad"
+text ldot "Dot"
+text lnstr "Nstream"
+text lclas "Classic"
+text lall "All"
+text liso "Isolated"
+text tfail "FAILED validation of "
+text tsum "sum"
+text tlb "["
+text trb "]"
+text tcolon ": "
+text tis " (is) != "
+text tshould " (should), diff="
+text tgt " > "
+text tlarg " (largest="
+text tmrel ", max_rel="
+text trp ")\n"
+text alist "--list"
+text adev "--device"
+text aas "--arraysize"
+text as1 "-s"
+text ant "--numtimes"
+text an1 "-n"
+text afl "--float"
+text apn "--print-names"
+text aonly "--only"
+text ao1 "-o"
+text aorder "--order"
+text acsv "--csv"
+text amib "--mibibytes"
+text amb "--megabytes"
+text agib "--gibibytes"
+text agb "--gigabytes"
+text atib "--tebibytes"
+text atb "--terabytes"
+text asil "--silence-errors"
+text ahelp "--help"
+text ah1 "-h"
+text tcpu "0: CPU\n"
+text tavail "Available benchmarks: "
+text tavail2 "Copy,Mul,Add,Triad,Dot,Nstream"
+text tavail3 "All, Classic,"
+text ebdev "Invalid device index.\n"
+text ebsize "Invalid array size.\n"
+text ebnt "Invalid number of times.\n"
+text ebnt2 "Number of times must be 2 or more\n"
+text ebonly "Expected benchmark name after --only\n"
+text ebname "Unknown benchmark name \""
+text ebname2 "\" after --only\n"
+text eborder "Expected benchmark order after --order. Options: \"Classic\" (default), \"Isolated\".\n"
+text ebarg "Unrecognized argument '"
+text ebarg2 "' (try '--help')\n"
+text ebsizd "Omega model: double runs take at most 33554432 elements (global pool limit).\n"
+text ebsizf "Omega model: --float runs take at most 16777216 elements (global pool limit).\n"
+text ebnt3 "Omega model: at most 1000000 times (loop bound limit).\n"
+text ebalen "Omega model: argument longer than 4096 bytes.\n"
+text tuse1 "\nUsage: "
+text tuse2 " [OPTIONS]\n\nOptions:\n  -h  --help               Print the message\n      --list               List available devices\n      --device     INDEX   Select device at INDEX\n  -s  --arraysize  SIZE    Use SIZE elements in the array\n  -n  --numtimes   NUM     Run the test NUM times (NUM >= 2)\n      --float              Use floats (rather than doubles)\n  -o  --only       NAME    Only run one benchmark (see --print-names)\n      --print-names        Prints all available benchmark names\n      --order              Benchmark run order: \"Classic\" (default) or \"Isolated\".\n      --csv                Output as csv table\n      --megabytes          Use MB=10^6 for bandwidth calculation (default)\n      --mibibytes          Use MiB=2^20 for bandwidth calculation (default MB=10^6)\n      --gibibytes          Use GiB=2^30 for bandwidth calculation (default MB=10^6)\n      --gigabytes          Use GB=10^9 for bandwidth calculation (default MB=10^6)\n      --tebibytes          Use TiB=2^40 for bandwidth calculation (default MB=10^6)\n      --terabytes          Use TB=10^12 for bandwidth calculation (default MB=10^6)\n      --silence-errors     Ignores validation errors.\n\n"
+
+note f64 kernels on the pools ad0 bd0 cd0, elements 0 .. n-1
+
+fn init_d0 n ulong va f64 vb f64 vc f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put ad0 i va
+put bd0 i vb
+put cd0 i vc
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put ad0 i va
+put bd0 i vb
+put cd0 i vc
+end
+end
+
+fn copy_d0 n ulong to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put cd0 i get ad0 i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put cd0 i get ad0 i
+end
+end
+
+fn mul_d0 n ulong sc f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put bd0 i mul sc get cd0 i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put bd0 i mul sc get cd0 i
+end
+end
+
+fn add_d0 n ulong to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put cd0 i add get ad0 i get bd0 i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put cd0 i add get ad0 i get bd0 i
+end
+end
+
+fn triad_d0 n ulong sc f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+x = mul sc get cd0 i
+put ad0 i add get bd0 i x
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+x = mul sc get cd0 i
+put ad0 i add get bd0 i x
+end
+end
+
+fn nstream_d0 n ulong sc f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+x = mul sc get cd0 i
+x = add get bd0 i x
+put ad0 i add get ad0 i x
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+x = mul sc get cd0 i
+x = add get bd0 i x
+put ad0 i add get ad0 i x
+end
+end
+
+fn dot_d0 n ulong s0 f64 to f64
+s = s0
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+s = add s mul get ad0 i get bd0 i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+s = add s mul get ad0 i get bd0 i
+end
+ret s
+end
+
+fn check_d0 n ulong ga f64 gb f64 gc f64 mr f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+chk_f64 97 get ad0 i ga mr i
+chk_f64 98 get bd0 i gb mr i
+chk_f64 99 get cd0 i gc mr i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+chk_f64 97 get ad0 i ga mr i
+chk_f64 98 get bd0 i gb mr i
+chk_f64 99 get cd0 i gc mr i
+end
+end
+
+note f64 kernels on the pools ad1 bd1 cd1, elements 0 .. n-1
+
+fn init_d1 n ulong va f64 vb f64 vc f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put ad1 i va
+put bd1 i vb
+put cd1 i vc
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put ad1 i va
+put bd1 i vb
+put cd1 i vc
+end
+end
+
+fn copy_d1 n ulong to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put cd1 i get ad1 i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put cd1 i get ad1 i
+end
+end
+
+fn mul_d1 n ulong sc f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put bd1 i mul sc get cd1 i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put bd1 i mul sc get cd1 i
+end
+end
+
+fn add_d1 n ulong to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put cd1 i add get ad1 i get bd1 i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put cd1 i add get ad1 i get bd1 i
+end
+end
+
+fn triad_d1 n ulong sc f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+x = mul sc get cd1 i
+put ad1 i add get bd1 i x
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+x = mul sc get cd1 i
+put ad1 i add get bd1 i x
+end
+end
+
+fn nstream_d1 n ulong sc f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+x = mul sc get cd1 i
+x = add get bd1 i x
+put ad1 i add get ad1 i x
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+x = mul sc get cd1 i
+x = add get bd1 i x
+put ad1 i add get ad1 i x
+end
+end
+
+fn dot_d1 n ulong s0 f64 to f64
+s = s0
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+s = add s mul get ad1 i get bd1 i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+s = add s mul get ad1 i get bd1 i
+end
+ret s
+end
+
+fn check_d1 n ulong ga f64 gb f64 gc f64 mr f64 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+chk_f64 97 get ad1 i ga mr add i 16777216
+chk_f64 98 get bd1 i gb mr add i 16777216
+chk_f64 99 get cd1 i gc mr add i 16777216
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+chk_f64 97 get ad1 i ga mr add i 16777216
+chk_f64 98 get bd1 i gb mr add i 16777216
+chk_f64 99 get cd1 i gc mr add i 16777216
+end
+end
+
+note f32 kernels on the pools af bf cf, elements 0 .. n-1
+
+fn init_f n ulong va f32 vb f32 vc f32 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put af i va
+put bf i vb
+put cf i vc
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put af i va
+put bf i vb
+put cf i vc
+end
+end
+
+fn copy_f n ulong to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put cf i get af i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put cf i get af i
+end
+end
+
+fn mul_f n ulong sc f32 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put bf i mul sc get cf i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put bf i mul sc get cf i
+end
+end
+
+fn add_f n ulong to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+put cf i add get af i get bf i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+put cf i add get af i get bf i
+end
+end
+
+fn triad_f n ulong sc f32 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+x = mul sc get cf i
+put af i add get bf i x
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+x = mul sc get cf i
+put af i add get bf i x
+end
+end
+
+fn nstream_f n ulong sc f32 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+x = mul sc get cf i
+x = add get bf i x
+put af i add get af i x
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+x = mul sc get cf i
+x = add get bf i x
+put af i add get af i x
+end
+end
+
+fn dot_f n ulong s0 f32 to f32
+s = s0
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+s = add s mul get af i get bf i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+s = add s mul get af i get bf i
+end
+ret s
+end
+
+fn check_f n ulong ga f32 gb f32 gc f32 mr f32 to void
+nb = shr n 10
+for k ulong nb
+for j ulong 1024
+i = add shl k 10 j
+chk_f32 97 get af i ga mr i
+chk_f32 98 get bf i gb mr i
+chk_f32 99 get cf i gc mr i
+end
+end
+t = shl nb 10
+for j ulong sub n t
+i = add t j
+chk_f32 97 get af i ga mr i
+chk_f32 98 get bf i gb mr i
+chk_f32 99 get cf i gc mr i
+end
+end
+
+note ---------------------------------------------------------------- run order
+
+note pick k: 1 when benchmark k (bench order) is selected.
+fn pick k ulong to ulong
+s = get cfg 6
+if eq s 7
+ret 1
+end
+if eq s 6
+if lt k 5
+ret 1
+end
+ret 0
+end
+if eq s k
+ret 1
+end
+ret 0
+end
+
+fn runf64 k ulong to void
+n = get cfg 0
+lo = n
+hi = ulong 0
+if gt n CH
+lo = CH
+hi = sub n CH
+end
+sc = f64 0.4
+if eq k 0
+copy_d0 lo
+copy_d1 hi
+ret
+end
+if eq k 1
+mul_d0 lo sc
+mul_d1 hi sc
+ret
+end
+if eq k 2
+add_d0 lo
+add_d1 hi
+ret
+end
+if eq k 3
+triad_d0 lo sc
+triad_d1 hi sc
+ret
+end
+if eq k 4
+s = dot_d0 lo 0.0
+s = dot_d1 hi s
+put rsd 0 s
+ret
+end
+nstream_d0 lo sc
+nstream_d1 hi sc
+end
+
+fn runf32 k ulong to void
+n = get cfg 0
+sc = f32 0.4f64
+if eq k 0
+copy_f n
+ret
+end
+if eq k 1
+mul_f n sc
+ret
+end
+if eq k 2
+add_f n
+ret
+end
+if eq k 3
+triad_f n sc
+ret
+end
+if eq k 4
+s = dot_f n f32 0.0
+put rsf 0 s
+ret
+end
+nstream_f n sc
+end
+
+note timed k: run benchmark k once; elapsed seconds (main.cpp time()).
+fn timed k ulong to f64
+fl = get cfg 2
+t0 = monons
+if eq fl 1
+runf32 k
+else
+runf64 k
+end
+t1 = monons
+ret div f64 sub t1 t0 1000000000.0
+end
+
+note rec_t k i t: record timing t of pass i for benchmark k; pass 0 is not recorded.
+fn rec_t k ulong i ulong t f64 to void
+if eq i 0
+ret
+end
+if eq i 1
+put tst k t
+put tst add k 6 t
+put tst add k 12 t
+ret
+end
+if lt t get tst k
+put tst k t
+end
+if gt t get tst add k 6
+put tst add k 6 t
+end
+put tst add k 12 add get tst add k 12 t
+end
+
+fn runall to void
+nt = get cfg 1
+if eq get cfg 7 0
+for i ulong nt
+for k ulong 6
+if eq pick k 1
+t = timed k
+rec_t k i t
+end
+end
+end
+ret
+end
+note Isolated: each benchmark runs nt times back to back; every pass gets total / nt.
+for k ulong 6
+if eq pick k 1
+t0 = monons
+for i ulong nt
+fl = get cfg 2
+if eq fl 1
+runf32 k
+else
+runf64 k
+end
+end
+t1 = monons
+t = div div f64 sub t1 t0 1000000000.0 f64 nt
+for i ulong nt
+rec_t k i t
+end
+end
+end
+end
+
+note ---------------------------------------------------------------- check_solution
+
+note chk_f64 nm is sh mr ix: main.cpp check(); nm 0 prints "sum", otherwise the byte nm,
+note ix = 2^64-1 means no index.
+fn chk_f64 nm uchar is f64 sh f64 mr f64 ix ulong to void
+d = fabs sub is sh
+lg = fabs is
+if lt lg fabs sh
+lg = fabs sh
+end
+if and le d mul lg mr eq is is
+ret
+end
+nf = add get cfg 8 1
+put cfg 8 nf
+if gt nf 10
+ret
+end
+failmsg nm ix
+og is
+ostr tis
+og sh
+ostr tshould
+og d
+ostr tgt
+og mul lg mr
+ostr tlarg
+og lg
+ostr tmrel
+og mr
+ostr trp
+end
+
+fn chk_f32 nm uchar is f32 sh f32 mr f32 ix ulong to void
+d = fabs sub is sh
+lg = fabs is
+if lt lg fabs sh
+lg = fabs sh
+end
+if and le d mul lg mr eq is is
+ret
+end
+nf = add get cfg 8 1
+put cfg 8 nf
+if gt nf 10
+ret
+end
+failmsg nm ix
+og f64 is
+ostr tis
+og f64 sh
+ostr tshould
+og f64 d
+ostr tgt
+og f64 mul lg mr
+ostr tlarg
+og f64 lg
+ostr tmrel
+og f64 mr
+ostr trp
+end
+
+fn failmsg nm uchar ix ulong to void
+ostr tfail
+if eq nm 0
+ostr tsum
+else
+ochr nm
+end
+if ne ix 18446744073709551615
+ostr tlb
+ou64 ix
+ostr trb
+end
+ostr tcolon
+end
+
+note gold values: replay the selected benchmarks in run order on scalars.
+fn gstep_d k ulong to void
+ga = get gd 0
+gb = get gd 1
+gc = get gd 2
+sc = f64 0.4
+if eq k 0
+put gd 2 ga
+end
+if eq k 1
+put gd 1 mul sc gc
+end
+if eq k 2
+put gd 2 add ga gb
+end
+if eq k 3
+put gd 0 add gb mul sc gc
+end
+if eq k 4
+put gd 3 mul mul ga gb f64 get cfg 0
+end
+if eq k 5
+put gd 0 add ga add gb mul sc gc
+end
+end
+
+fn gstep_f k ulong to void
+ga = get gf 0
+gb = get gf 1
+gc = get gf 2
+sc = f32 0.4f64
+if eq k 0
+put gf 2 ga
+end
+if eq k 1
+put gf 1 mul sc gc
+end
+if eq k 2
+put gf 2 add ga gb
+end
+if eq k 3
+put gf 0 add gb mul sc gc
+end
+if eq k 4
+put gf 3 mul mul ga gb f32 get cfg 0
+end
+if eq k 5
+put gf 0 add ga add gb mul sc gc
+end
+end
+
+fn gstep k ulong to void
+if eq get cfg 2 1
+gstep_f k
+else
+gstep_d k
+end
+end
+
+fn gold to void
+put gd 0 0.1
+put gd 1 0.2
+put gd 2 0.0
+put gd 3 0.0
+put gf 0 f32 0.1f64
+put gf 1 f32 0.2f64
+put gf 2 f32 0.0f64
+put gf 3 f32 0.0f64
+nt = get cfg 1
+if eq get cfg 7 0
+for i ulong nt
+for k ulong 6
+if eq pick k 1
+gstep k
+end
+end
+end
+ret
+end
+for k ulong 6
+if eq pick k 1
+for i ulong nt
+gstep k
+end
+end
+end
+end
+
+note max_rel = epsilon * 100, max_rel_dot = epsilon * 10^7; epsilon is 2^-52 (double)
+note or 2^-23 (float), built from its IEEE-754 bit pattern.
+fn check to void
+gold
+oto 2
+n = get cfg 0
+all = ulong 18446744073709551615
+if eq get cfg 2 1
+eps = bitcast f32 uint 872415232
+mr = mul eps f32 100.0f64
+if eq pick 4 1
+chk_f32 0 get rsf 0 get gf 3 mul eps f32 10000000.0f64 all
+end
+check_f n get gf 0 get gf 1 get gf 2 mr
+else
+eps = bitcast f64 ulong 4372995238176751616
+mr = mul eps 100.0
+if eq pick 4 1
+chk_f64 0 get rsd 0 get gd 3 mul eps 10000000.0 all
+end
+lo = n
+hi = ulong 0
+if gt n CH
+lo = CH
+hi = sub n CH
+end
+check_d0 lo get gd 0 get gd 1 get gd 2 mr
+check_d1 hi get gd 0 get gd 1 get gd 2 mr
+end
+oto 1
+if and gt get cfg 8 0 eq get cfg 5 0
+exit 1
+end
+end
+
+note ---------------------------------------------------------------- output
+
+fn ounit to void
+u = get cfg 4
+if eq u 0
+ostr tmb
+end
+if eq u 1
+ostr tgb
+end
+if eq u 2
+ostr ttb
+end
+if eq u 3
+ostr tmib
+end
+if eq u 4
+ostr tgib
+end
+if eq u 5
+ostr ttib
+end
+end
+
+note ufmt b: bytes b in the selected unit (Unit::fmt); 2^-20, 2^-30, 2^-40 from bit patterns.
+fn ufmt b f64 to f64
+u = get cfg 4
+if eq u 1
+ret mul 1.0e-9 b
+end
+if eq u 2
+ret mul 1.0e-12 b
+end
+if eq u 3
+ret mul bitcast f64 ulong 4517110426252607488 b
+end
+if eq u 4
+ret mul bitcast f64 ulong 4472074429978902528 b
+end
+if eq u 5
+ret mul bitcast f64 ulong 4427038433705197568 b
+end
+ret mul 1.0e-6 b
+end
+
+fn olabel k ulong to void
+if eq k 0
+ostr lcopy
+end
+if eq k 1
+ostr lmul
+end
+if eq k 2
+ostr ladd
+end
+if eq k 3
+ostr ltriad
+end
+if eq k 4
+ostr ldot
+end
+if eq k 5
+ostr lnstr
+end
+end
+
+fn weight k ulong to ulong
+if or eq k 2 eq k 3
+ret 3
+end
+if eq k 5
+ret 4
+end
+ret 2
+end
+
+fn tsize to ulong
+if eq get cfg 2 1
+ret 4
+end
+ret 8
+end
+
+fn header to void
+ostr tbabel
+ostr trun
+s = get cfg 6
+if eq s 7
+ostr tall
+end
+if eq s 6
+ostr tclas
+end
+if lt s 6
+ostr trun
+olabel s
+ostr tsp
+end
+ou64 get cfg 1
+ostr ttimes
+if eq get cfg 7 1
+ostr toiso
+else
+ostr tocl
+end
+ostr tordr
+ostr tnel
+ou64 get cfg 0
+ostr tnl
+ostr tprec
+if eq get cfg 2 1
+ostr tflt
+else
+ostr tdbl
+end
+nb = mul get cfg 0 tsize
+ostr tasz
+ofix ufmt f64 nb 1
+ostr tsp
+ounit
+ostr tnl
+ostr ttsz
+ofix ufmt mul 3.0 f64 nb 1
+ostr tsp
+ounit
+ostr tnl
+oflush
+end
+
+fn table to void
+nt = get cfg 1
+n = get cfg 0
+csv = get cfg 3
+if eq csv 1
+ostr tcsvh
+ounit
+ostr tcsvh2
+else
+p = get obn 0
+ostr tfunc
+opad p 12
+p = get obn 0
+ounit
+ostr tps
+opad p 12
+p = get obn 0
+ostr tmin
+opad p 12
+p = get obn 0
+ostr tmax
+opad p 12
+p = get obn 0
+ostr tavg
+opad p 12
+ostr tnl
+end
+for k ulong 6
+if eq pick k 1
+mn = get tst k
+mx = get tst add k 6
+av = div get tst add k 12 f64 sub nt 1
+bw = ufmt div f64 mul mul weight k tsize n mn
+if eq csv 1
+olabel k
+ostr tcomma
+ou64 nt
+ostr tcomma
+ou64 n
+ostr tcomma
+ou64 tsize
+ostr tcomma
+og bw
+ostr tcomma
+og mn
+ostr tcomma
+og mx
+ostr tcomma
+og av
+ostr tnl
+else
+p = get obn 0
+olabel k
+opad p 12
+p = get obn 0
+ofix bw 3
+opad p 12
+p = get obn 0
+ofix mn 5
+opad p 12
+p = get obn 0
+ofix mx 5
+opad p 12
+p = get obn 0
+ofix av 5
+opad p 12
+ostr tnl
+end
+oflush
+end
+end
+end
+
+note ---------------------------------------------------------------- arguments
+
+note arg i: copy argument i into ab; its length goes to abn.
+fn arg i ulong to void
+r = argread i ab 0 len ab
+if lt r 0
+oto 2
+ostr ebalen
+oto 1
+exit 1
+end
+put abn 0 ulong r
+end
+
+note argis t: 1 when the current argument equals text t.
+fn argis t view uchar * to ulong
+n = get abn 0
+if ne n len t
+ret 0
+end
+for i ulong n
+if ne get ab i get t i
+ret 0
+end
+end
+ret 1
+end
+
+note num: the current argument as a decimal number; 2^64-1 when it is not one
+note (empty, a sign or any other byte, or more than 18 digits).
+fn num to ulong
+bad = ulong 18446744073709551615
+n = get abn 0
+if or eq n 0 gt n 18
+ret bad
+end
+v = ulong 0
+for i ulong n
+c = get ab i
+if or lt c 48 gt c 57
+ret bad
+end
+v = add mul v 10 ulong sub c 48
+end
+ret v
+end
+
+fn errout t view uchar * to void
+oto 2
+ostr t
+oto 1
+exit 1
+end
+
+fn ocurarg to void
+for i ulong get abn 0
+ochr get ab i
+end
+end
+
+fn parse to void
+c = argcnt
+nargs = ulong c
+put cfg 0 33554432
+put cfg 1 100
+put cfg 6 6
+i = ulong 1
+while lt i nargs bound 999999
+arg i
+done = ulong 0
+if eq argis alist 1
+ostr tcpu
+oflush
+exit 0
+end
+if eq argis adev 1
+i = add i 1
+if ge i nargs
+errout ebdev
+end
+arg i
+if eq num 18446744073709551615
+errout ebdev
+end
+done = ulong 1
+end
+if or eq argis aas 1 eq argis as1 1
+i = add i 1
+if ge i nargs
+errout ebsize
+end
+arg i
+v = num
+if or eq v 18446744073709551615 eq v 0
+errout ebsize
+end
+put cfg 0 v
+done = ulong 1
+end
+if or eq argis ant 1 eq argis an1 1
+i = add i 1
+if ge i nargs
+errout ebnt
+end
+arg i
+v = num
+if eq v 18446744073709551615
+errout ebnt
+end
+if lt v 2
+errout ebnt2
+end
+if gt v 1000000
+errout ebnt3
+end
+put cfg 1 v
+done = ulong 1
+end
+if eq argis afl 1
+put cfg 2 1
+done = ulong 1
+end
+if eq argis apn 1
+ostr tavail
+ostr tavail2
+ostr tnl
+oflush
+exit 0
+end
+if or eq argis aonly 1 eq argis ao1 1
+i = add i 1
+if ge i nargs
+errout ebonly
+end
+arg i
+sel = ulong 99
+if eq argis lclas 1
+sel = ulong 6
+end
+if eq argis lall 1
+sel = ulong 7
+end
+if eq argis lcopy 1
+sel = ulong 0
+end
+if eq argis lmul 1
+sel = ulong 1
+end
+if eq argis ladd 1
+sel = ulong 2
+end
+if eq argis ltriad 1
+sel = ulong 3
+end
+if eq argis ldot 1
+sel = ulong 4
+end
+if eq argis lnstr 1
+sel = ulong 5
+end
+if eq sel 99
+oto 2
+ostr ebname
+ocurarg
+ostr ebname2
+ostr tavail
+ostr tavail3
+ostr tavail2
+ostr tnl
+oto 1
+exit 1
+end
+put cfg 6 sel
+done = ulong 1
+end
+if eq argis aorder 1
+i = add i 1
+if ge i nargs
+errout eborder
+end
+arg i
+if eq argis liso 1
+put cfg 7 1
+end
+done = ulong 1
+end
+if eq argis acsv 1
+put cfg 3 1
+done = ulong 1
+end
+if eq argis amb 1
+put cfg 4 0
+done = ulong 1
+end
+if eq argis agb 1
+put cfg 4 1
+done = ulong 1
+end
+if eq argis atb 1
+put cfg 4 2
+done = ulong 1
+end
+if eq argis amib 1
+put cfg 4 3
+done = ulong 1
+end
+if eq argis agib 1
+put cfg 4 4
+done = ulong 1
+end
+if eq argis atib 1
+put cfg 4 5
+done = ulong 1
+end
+if eq argis asil 1
+put cfg 5 1
+done = ulong 1
+end
+if or eq argis ahelp 1 eq argis ah1 1
+ostr tuse1
+arg 0
+ocurarg
+ostr tuse2
+oflush
+exit 0
+end
+if eq done 0
+oto 2
+ostr ebarg
+ocurarg
+ostr ebarg2
+oto 1
+exit 1
+end
+i = add i 1
+end
+note Omega model limits, checked once every option is known
+n = get cfg 0
+if eq get cfg 2 1
+if gt n 16777216
+oto 2
+ostr ebsize
+errout ebsizf
+end
+else
+if gt n 33554432
+oto 2
+ostr ebsize
+errout ebsizd
+end
+end
+end
+
+note ---------------------------------------------------------------- main
+
+fn init to void
+n = get cfg 0
+if eq get cfg 2 1
+init_f n f32 0.1f64 f32 0.2f64 f32 0.0f64
+ret
+end
+lo = n
+hi = ulong 0
+if gt n CH
+lo = CH
+hi = sub n CH
+end
+init_d0 lo 0.1 0.2 0.0
+init_d1 hi 0.1 0.2 0.0
+end
+
+fn main to int
+put ofd 0 1
+parse
+if eq get cfg 3 0
+header
+end
+init
+runall
+check
+table
+oflush
+ret 0
+end

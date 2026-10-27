@@ -1,0 +1,332 @@
+om2
+note BabelStream Omega model: buffered output and number formatting.
+note For full license terms please see the LICENSE file distributed with this source code.
+note
+note This unit is concatenated in front of babelstream.om (Omega has no imports yet), so it
+note carries the om2 profile line: OM-2 gives the unsized `view uchar *` parameters used below.
+note
+note Formatting mirrors what main.cpp gets from std::ostream:
+note   ofix v d  ->  std::fixed with setprecision(d)  (table rows, "Array size", "Total size")
+note   og v      ->  default float output, precision 6 (printf %g), used by --csv and by the
+note                 FAILED validation messages
+note Both round the value once in binary64 before choosing decimal digits, so a value that lies
+note within one rounding step of a decimal tie can differ from printf in its last digit.
+
+text tnan "nan"
+text tinf "inf"
+
+note ob: output bytes not yet written; obn 0: their count; ofd 0: descriptor they go to
+note (globals start zero-filled, so main sets ofd 0 to 1 first).
+global ob uchar 8192
+global obn ulong 1
+global ofd int 1
+
+fn oflush to void
+n = get obn 0
+o = ulong 0
+note every pass writes at least one byte or exits, so n <= 8192 passes suffice.
+while lt o n bound 8192
+r = write get ofd 0 ob o sub n o
+if le r 0
+exit 1
+end
+o = add o ulong r
+end
+put obn 0 0
+end
+
+note oto fd: flush what is pending, then send later output to fd (1 stdout, 2 stderr).
+fn oto fd int to void
+oflush
+put ofd 0 fd
+end
+
+fn ochr c uchar to void
+n = get obn 0
+if eq n len ob
+oflush
+n = ulong 0
+end
+put ob n c
+put obn 0 add n 1
+end
+
+fn ostr t view uchar * to void
+for i ulong len t
+ochr get t i
+end
+end
+
+note opad s w: append spaces until w bytes follow position s (std::left << std::setw(w)).
+fn opad s ulong w ulong to void
+k = sub get obn 0 s
+while lt k w bound 4096
+ochr 32
+k = add k 1
+end
+end
+
+note ou64 v: decimal digits of v.
+fn ou64 v ulong to void
+d = new uchar 20 0
+k = ulong 0
+x = v
+while true bound 20
+put d k uchar add rem x 10 48
+k = add k 1
+x = div x 10
+if eq x 0
+break
+end
+end
+for i ulong k
+ochr get d sub sub k 1 i
+end
+end
+
+note ozpad v w: v as exactly w decimal digits, leading zeros (v < 10^w).
+fn ozpad v ulong w ulong to void
+d = new uchar 20 48
+x = v
+for i ulong w
+put d i uchar add rem x 10 48
+x = div x 10
+end
+for i ulong w
+ochr get d sub sub w 1 i
+end
+end
+
+note Exact decimal rounding. A finite x > 0 is M * 2^E exactly (M < 2^53). rnd x k returns
+note round(x * 10^k), ties to even, from that exact value: 2M is multiplied by 5^k and 2^k (or
+note divided by 10^-k) and divided by 2^-E in a 36-limb (32 bits per limb) integer; the lowest
+note bit of floor(2 * x * 10^k) is the half bit and bst 0 records any nonzero remainder.
+global bg ulong 36
+global bst ulong 1
+
+fn bset v ulong to void
+for i ulong 36
+put bg i 0
+end
+put bg 0 and v 4294967295
+put bg 1 shr v 32
+put bst 0 0
+end
+
+note bmul c: bg = bg * c (c < 2^32)
+fn bmul c ulong to void
+cy = ulong 0
+for i ulong 36
+t = add mul get bg i c cy
+put bg i and t 4294967295
+cy = shr t 32
+end
+end
+
+note bdiv c: bg = floor(bg / c) (0 < c <= 2^32); a nonzero remainder sets bst 0.
+fn bdiv c ulong to void
+r = ulong 0
+for k ulong 36
+i = sub 35 k
+cur = add shl r 32 get bg i
+put bg i div cur c
+r = rem cur c
+end
+if ne r 0
+put bst 0 1
+end
+end
+
+note bmul2 n / bdiv2 n: multiply or divide bg by 2^n, 16 bits at a time.
+fn bmul2 n ulong to void
+k = n
+while ge k 16 bound 128
+bmul 65536
+k = sub k 16
+end
+bmul shl 1 k
+end
+
+fn bdiv2 n ulong to void
+k = n
+while ge k 16 bound 128
+bdiv 65536
+k = sub k 16
+end
+bdiv shl 1 k
+end
+
+note rnd x k: round(x * 10^k), ties to even, for finite x > 0 and a result below 2^62.
+fn rnd x f64 k long to ulong
+bits = bitcast ulong x
+ex = and shr bits 52 2047
+m = and bits 4503599627370495
+e2 = long -1074
+if ne ex 0
+m = or m 4503599627370496
+e2 = sub long ex 1075
+end
+bset shl m 1
+p2 = e2
+if ge k 0
+for i ulong ulong k
+bmul 5
+end
+p2 = add e2 k
+end
+if gt p2 0
+bmul2 ulong p2
+end
+if lt k 0
+for i ulong ulong neg k
+bdiv 10
+end
+end
+if lt p2 0
+bdiv2 ulong neg p2
+end
+q2 = or get bg 0 shl get bg 1 32
+q = shr q2 1
+if ne and q2 1 0
+if or ne get bst 0 0 ne and q 1 0
+q = add q 1
+end
+end
+ret q
+end
+
+note osign v: write '-' when the sign bit of v is set; returns |v|.
+fn osign v f64 to f64
+if ne shr bitcast ulong v 63 0
+ochr 45
+end
+ret fabs v
+end
+
+note ofix v d: std::fixed, d decimals (d <= 5); values of 1e13 or more fall back to og.
+fn ofix v f64 d ulong to void
+x = osign v
+if ne x x
+ostr tnan
+ret
+end
+if gt x 1.7976931348623157e308
+ostr tinf
+ret
+end
+if ge x 1.0e13
+og x
+ret
+end
+p = ulong 1
+for i ulong d
+p = mul p 10
+end
+q = ulong 0
+if gt x 0.0
+q = rnd x long d
+end
+ou64 div q p
+if gt d 0
+ochr 46
+ozpad rem q p d
+end
+end
+
+note gdig x e: round(x * 10^(5-e)), the six significant digits of x for decimal exponent e.
+fn gdig x f64 e long to ulong
+ret rnd x sub 5 e
+end
+
+note og v: printf "%g" (precision 6) of v.
+fn og v f64 to void
+x = osign v
+if ne x x
+ostr tnan
+ret
+end
+if gt x 1.7976931348623157e308
+ostr tinf
+ret
+end
+if eq x 0.0
+ochr 48
+ret
+end
+note first estimate of the decimal exponent e with 10^e <= x < 10^(e+1)
+e = long 0
+y = x
+while ge y 10.0 bound 400
+y = div y 10.0
+e = add e 1
+end
+while lt y 1.0 bound 400
+y = mul y 10.0
+e = sub e 1
+end
+m = gdig x e
+if ge m 1000000
+e = add e 1
+m = gdig x e
+end
+if lt m 100000
+e = sub e 1
+m = gdig x e
+end
+d = new uchar 6 0
+z = m
+for i ulong 6
+put d sub 5 i uchar add rem z 10 48
+z = div z 10
+end
+note last: index of the last nonzero digit (trailing zeros are dropped by %g)
+last = ulong 0
+for i ulong 6
+if ne get d i 48
+last = i
+end
+end
+if or lt e -4 ge e 6
+ochr get d 0
+if gt last 0
+ochr 46
+for i ulong last
+ochr get d add i 1
+end
+end
+ochr 101
+ae = e
+if lt e 0
+ochr 45
+ae = neg e
+else
+ochr 43
+end
+if lt ae 10
+ochr 48
+end
+ou64 ulong ae
+ret
+end
+if ge e 0
+ie = ulong e
+for i ulong add ie 1
+ochr get d i
+end
+if gt last ie
+ochr 46
+for i ulong sub last ie
+ochr get d add add ie 1 i
+end
+end
+ret
+end
+ochr 48
+ochr 46
+for i ulong ulong sub neg e 1
+ochr 48
+end
+for i ulong add last 1
+ochr get d i
+end
+end
